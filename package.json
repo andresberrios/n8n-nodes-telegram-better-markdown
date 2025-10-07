@@ -1,6 +1,6 @@
 {
     "name": "n8n-nodes-telegram-better-markdown",
-    "version": "0.1.0",
+    "version": "1.0.0",
     "description": "n8n node to convert Markdown to Telegram-compatible HTML for use with Telegram Bot API",
     "license": "MIT",
     "homepage": "https://github.com/andresberrios/n8n-nodes-telegram-better-markdown",
