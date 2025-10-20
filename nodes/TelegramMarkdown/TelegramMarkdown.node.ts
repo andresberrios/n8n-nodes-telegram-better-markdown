@@ -231,6 +231,104 @@ export function markdownToTelegramHtml(markdown: string): string {
 	return nodeToHtml(tree);
 }
 
+// --- Helpers for truncating/splitting HTML without breaking sections ---
+/**
+ * Tokenize HTML into tags and text pieces.
+ */
+function tokenizeHtml(html: string): string[] {
+	const tokens: string[] = [];
+	const regex = /(<[^>]+>|[^<]+)/g;
+	let match: RegExpExecArray | null;
+	while ((match = regex.exec(html)) !== null) {
+		tokens.push(match[0]);
+	}
+	return tokens;
+}
+
+/**
+ * Determine if a token is a block-level tag boundary where it's safe to split after.
+ */
+function isSafeBoundary(token: string): boolean {
+	if (!token) return false;
+	// closing tags for common block-level elements or self-contained tags
+	const safeClosing = ["</pre>", "</blockquote>", "</table>", "</ul>", "</ol>", "</div>", "</p>", "</b>", "</i>", "</code>"];
+	const lower = token.toLowerCase();
+	for (const s of safeClosing) {
+		if (lower.endsWith(s)) return true;
+	}
+	// Also if token is a standalone tag like <hr> or thematic '------' not captured as tag
+	if (/^<hr\b|^<br\b|^<thematicbreak\b/.test(lower)) return true;
+	// Also safe if token is entirely whitespace/newline
+	if (/^\s+$/.test(token)) return true;
+	return false;
+}
+
+/**
+ * Safely truncate HTML to maxLength and append [...] if truncated.
+ */
+function safeTruncateHtml(html: string, maxLength: number): string {
+	if (html.length <= maxLength) return html;
+	const tokens = tokenizeHtml(html);
+	let acc = '';
+	let lastSafeIndex = -1;
+	for (let i = 0; i < tokens.length; i++) {
+		const t = tokens[i];
+		if (acc.length + t.length > maxLength) break;
+		acc += t;
+		if (isSafeBoundary(t)) lastSafeIndex = acc.length;
+	}
+	// If we didn't find a safe spot, fallback to hard cut
+	let result = acc;
+	if (lastSafeIndex > 0 && lastSafeIndex < result.length) {
+		result = result.slice(0, lastSafeIndex);
+	}
+	// Ensure we don't cut in the middle of a tag: if result ends with '<' or inside tag, remove trailing fragment
+	const lastLt = result.lastIndexOf('<');
+	const lastGt = result.lastIndexOf('>');
+	if (lastLt > lastGt) {
+		result = result.slice(0, lastLt);
+	}
+	// Trim and append ellipsis marker
+	result = result.trimEnd();
+	if (!result.endsWith('[...]')) result += ' [...]';
+	return result;
+}
+
+/**
+ * Split HTML into multiple chunks of at most maxLength, trying to split on safe boundaries.
+ */
+function splitHtmlIntoChunks(html: string, maxLength: number): string[] {
+	const tokens = tokenizeHtml(html);
+	const parts: string[] = [];
+	let acc = '';
+	let lastSafePos = -1; // position in acc string
+	for (let i = 0; i < tokens.length; i++) {
+		const t = tokens[i];
+		// If adding token exceeds limit
+		if (acc.length + t.length > maxLength) {
+			// If we have a safe split point, cut there
+			if (lastSafePos > 0) {
+				parts.push(acc.slice(0, lastSafePos).trim());
+				// start new accumulator with remainder after lastSafePos
+				acc = acc.slice(lastSafePos) + t;
+				lastSafePos = -1;
+			} else {
+				// No safe point found: hard cut at maxLength
+				parts.push(acc.slice(0, maxLength).trim());
+				acc = acc.slice(maxLength) + t;
+			}
+		} else {
+			acc += t;
+		}
+
+		if (isSafeBoundary(t)) {
+			lastSafePos = acc.length;
+		}
+	}
+	if (acc.trim().length > 0) parts.push(acc.trim());
+	return parts;
+}
+
 export class TelegramMarkdown implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Telegram Markdown',
@@ -265,6 +363,25 @@ export class TelegramMarkdown implements INodeType {
 				default: 'telegramHtml',
 				description: 'The name of the field where the converted HTML will be stored',
 			},
+			{
+				displayName: 'Message Limit Strategy',
+				name: 'messageLimitStrategy',
+				type: 'options',
+				options: [
+					{
+						description: 'Truncate the message to 4096 characters and append [...].',
+						name: 'Truncate message',
+						value: 'truncate',
+					},
+					{
+						description: 'Split the message into multiple messages of <=4096 characters without cutting HTML sections.',
+						name: 'Split message',
+						value: 'split',
+					},
+				],
+				default: 'truncate',
+				description: 'What to do when the generated HTML exceeds Telegram\'s 4096 character limit.',
+			},
 		],
 	};
 
@@ -276,8 +393,51 @@ export class TelegramMarkdown implements INodeType {
 			try {
 				const markdownText = this.getNodeParameter('markdownText', itemIndex, '') as string;
 				const outputField = this.getNodeParameter('outputField', itemIndex, 'telegramHtml') as string;
+				const messageLimitStrategy = this.getNodeParameter('messageLimitStrategy', itemIndex, 'truncate') as string;
 
 				const telegramHtml = markdownToTelegramHtml(markdownText);
+
+				// If message is under Telegram limit, just return as single item
+				if (telegramHtml.length <= 4096) {
+					const newItem: INodeExecutionData = {
+						json: {
+							...items[itemIndex].json,
+							[outputField]: telegramHtml,
+						},
+						pairedItem: itemIndex,
+					};
+					returnData.push(newItem);
+					continue;
+				}
+
+				if (messageLimitStrategy === 'truncate') {
+					const truncated = safeTruncateHtml(telegramHtml, 4096);
+					const newItem: INodeExecutionData = {
+						json: {
+							...items[itemIndex].json,
+							[outputField]: truncated,
+						},
+						pairedItem: itemIndex,
+					};
+					returnData.push(newItem);
+					continue;
+				}
+
+				if (messageLimitStrategy === 'split') {
+					const parts = splitHtmlIntoChunks(telegramHtml, 4096);
+					// For split, create multiple output items, each with the same original data
+					for (const part of parts) {
+						const newItem: INodeExecutionData = {
+							json: {
+								...items[itemIndex].json,
+								[outputField]: part,
+							},
+							pairedItem: itemIndex,
+						};
+						returnData.push(newItem);
+					}
+					continue;
+				}
 
 				const newItem: INodeExecutionData = {
 					json: {
