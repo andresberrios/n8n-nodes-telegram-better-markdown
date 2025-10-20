@@ -58,6 +58,15 @@ In the Telegram node, set:
 - **Text**: `{{ $json.telegramHtml }}`
 - **Parse Mode**: `HTML`
 
+## Message Limit handling
+
+This node includes a `Message Limit Strategy` option with two behaviors when the generated HTML exceeds Telegram's 4096 character limit:
+
+- `Truncate message` (default): cuts the output at a safe HTML boundary and appends ` [...]` to indicate truncation.
+- `Split message`: splits the output into multiple messages of at most 4096 characters each. Splits are performed on safe boundaries so that HTML sections (for example headers, links, pre/code blocks, blockquotes) are not cut in the middle.
+
+When using `Split message`, the node will output multiple items (one per message chunk) preserving the original item's other JSON fields and adding the chunked HTML into the configured output field.
+
 ## Supported Markdown Features
 
 | Markdown | Output | Telegram Tag |
